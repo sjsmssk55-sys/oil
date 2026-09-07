@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>오일파스텔 스튜디오 - 교사용 접속 현황</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+  <style>
+    body { font-family: -apple-system, 'Malgun Gothic', sans-serif; }
+  </style>
+</head>
+<body class="min-h-screen bg-slate-100 p-6">
+
+  <div class="max-w-4xl mx-auto">
+    <div class="flex items-center justify-between mb-6">
+      <h1 class="text-2xl font-extrabold text-indigo-900">🎨 오일파스텔 스튜디오 - 접속 현황</h1>
+      <div id="conn-status" class="text-xs font-bold px-3 py-1.5 rounded-full bg-gray-200 text-gray-600">연결 확인 중...</div>
+    </div>
+
+    <!-- 설정 안내 (firebaseConfig 미입력 시에만 표시) -->
+    <div id="setup-warning" class="hidden mb-6 p-4 bg-amber-50 border border-amber-300 rounded-xl text-sm text-amber-800">
+      <b>Firebase 설정이 비어있습니다.</b> 이 파일 안의 <code>firebaseConfig</code> 값을 학생용 파일과 동일하게 채워주세요.
+    </div>
+
+    <div class="grid grid-cols-3 gap-4 mb-6">
+      <div class="bg-white rounded-xl shadow p-4">
+        <div class="text-xs text-gray-500 font-bold">전체 학생 수</div>
+        <div id="stat-total" class="text-3xl font-extrabold text-indigo-900 mt-1">0</div>
+      </div>
+      <div class="bg-white rounded-xl shadow p-4">
+        <div class="text-xs text-gray-500 font-bold">현재 접속 중</div>
+        <div id="stat-online" class="text-3xl font-extrabold text-green-600 mt-1">0</div>
+      </div>
+      <div class="bg-white rounded-xl shadow p-4">
+        <div class="text-xs text-gray-500 font-bold">접속 종료</div>
+        <div id="stat-offline" class="text-3xl font-extrabold text-gray-400 mt-1">0</div>
+      </div>
+    </div>
+
+    <div class="bg-white rounded-xl shadow overflow-hidden">
+      <table class="w-full text-sm">
+        <thead class="bg-indigo-900 text-white">
+          <tr>
+            <th class="text-left px-4 py-3 font-bold">상태</th>
+            <th class="text-left px-4 py-3 font-bold">학번</th>
+            <th class="text-left px-4 py-3 font-bold">이름</th>
+            <th class="text-left px-4 py-3 font-bold">마지막 신호</th>
+          </tr>
+        </thead>
+        <tbody id="student-rows">
+          <tr><td colspan="4" class="text-center text-gray-400 py-10">학생이 아직 접속하지 않았습니다.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="text-xs text-gray-400 mt-4">
+      학생 화면은 20초마다 짧은 신호를 보냅니다. 40초 이상 신호가 없으면 자동으로 "접속 종료"로 표시됩니다.
+      (수업 중 이 창을 계속 열어두시면 실시간으로 갱신됩니다.)
+    </p>
+  </div>
+
+  <script>
+    // ====== 여기에 학생용 파일과 "동일한" firebaseConfig 값을 붙여넣으세요 ======
+    const firebaseConfig = {
+      apiKey: "AIzaSyDqkEjFmBq-VKiSHXQdzYob_3ylQpgxyPs",
+      authDomain: "oil-pastel-class.firebaseapp.com",
+      databaseURL: "https://oil-pastel-class-default-rtdb.asia-southeast1.firebasedatabase.app",
+      projectId: "oil-pastel-class",
+      storageBucket: "oil-pastel-class.firebasestorage.app",
+      messagingSenderId: "624497194711",
+      appId: "1:624497194711:web:499191a60a0ab1f2a1a292"
+    };
+    // =======================================================================
+
+    const OFFLINE_THRESHOLD_MS = 40000; // 40초 이상 신호 없으면 오프라인 처리
+    let studentsData = {};
+
+    function timeAgoText(timestamp) {
+      if (!timestamp) return '-';
+      const diffSec = Math.floor((Date.now() - timestamp) / 1000);
+      if (diffSec < 5) return '방금 전';
+      if (diffSec < 60) return `${diffSec}초 전`;
+      const diffMin = Math.floor(diffSec / 60);
+      if (diffMin < 60) return `${diffMin}분 전`;
+      const diffHour = Math.floor(diffMin / 60);
+      return `${diffHour}시간 전`;
+    }
+
+    function isEffectivelyOnline(student) {
+      if (!student.online) return false;
+      if (!student.lastActive) return false;
+      return (Date.now() - student.lastActive) < OFFLINE_THRESHOLD_MS;
+    }
+
+    function render() {
+      const rows = Object.values(studentsData).sort((a, b) => {
+        const aOnline = isEffectivelyOnline(a);
+        const bOnline = isEffectivelyOnline(b);
+        if (aOnline !== bOnline) return aOnline ? -1 : 1;
+        return (a.id || '').localeCompare(b.id || '');
+      });
+
+      const tbody = document.getElementById('student-rows');
+      if (rows.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" class="text-center text-gray-400 py-10">학생이 아직 접속하지 않았습니다.</td></tr>';
+      } else {
+        tbody.innerHTML = rows.map(s => {
+          const online = isEffectivelyOnline(s);
+          const badge = online
+            ? '<span class="inline-flex items-center gap-1.5 text-green-700 font-bold"><span class="w-2 h-2 rounded-full bg-green-500 inline-block"></span>접속 중</span>'
+            : '<span class="inline-flex items-center gap-1.5 text-gray-400 font-bold"><span class="w-2 h-2 rounded-full bg-gray-300 inline-block"></span>접속 종료</span>';
+          return `
+            <tr class="border-t border-gray-100">
+              <td class="px-4 py-3">${badge}</td>
+              <td class="px-4 py-3 font-mono">${s.id || '-'}</td>
+              <td class="px-4 py-3 font-bold">${s.name || '-'}</td>
+              <td class="px-4 py-3 text-gray-500">${timeAgoText(s.lastActive)}</td>
+            </tr>`;
+        }).join('');
+      }
+
+      const total = rows.length;
+      const onlineCount = rows.filter(isEffectivelyOnline).length;
+      document.getElementById('stat-total').innerText = total;
+      document.getElementById('stat-online').innerText = onlineCount;
+      document.getElementById('stat-offline').innerText = total - onlineCount;
+    }
+
+    function initDashboard() {
+      if (!firebaseConfig.databaseURL) {
+        document.getElementById('setup-warning').classList.remove('hidden');
+        document.getElementById('conn-status').innerText = '설정 필요';
+        document.getElementById('conn-status').className = 'text-xs font-bold px-3 py-1.5 rounded-full bg-amber-100 text-amber-700';
+        return;
+      }
+
+      try {
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.database();
+
+        db.ref('.info/connected').on('value', (snap) => {
+          const el = document.getElementById('conn-status');
+          if (snap.val() === true) {
+            el.innerText = '실시간 연결됨';
+            el.className = 'text-xs font-bold px-3 py-1.5 rounded-full bg-green-100 text-green-700';
+          } else {
+            el.innerText = '연결 끊김';
+            el.className = 'text-xs font-bold px-3 py-1.5 rounded-full bg-red-100 text-red-700';
+          }
+        });
+
+        db.ref('students').on('value', (snapshot) => {
+          studentsData = snapshot.val() || {};
+          render();
+        });
+
+        // 신호 타임아웃(40초) 판정은 시간 흐름에 따라 바뀌므로 주기적으로 다시 그려줌
+        setInterval(render, 5000);
+      } catch (err) {
+        document.getElementById('conn-status').innerText = '연결 오류';
+        document.getElementById('conn-status').className = 'text-xs font-bold px-3 py-1.5 rounded-full bg-red-100 text-red-700';
+        console.error('Firebase 초기화 오류:', err);
+      }
+    }
+
+    initDashboard();
+  </script>
+</body>
+</html>
