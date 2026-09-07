@@ -24,40 +24,21 @@
       <b>Firebase 설정이 비어있습니다.</b> 이 파일 안의 <code>firebaseConfig</code> 값을 학생용 파일과 동일하게 채워주세요.
     </div>
 
-    <div class="grid grid-cols-3 gap-4 mb-6">
-      <div class="bg-white rounded-xl shadow p-4">
-        <div class="text-xs text-gray-500 font-bold">전체 학생 수</div>
-        <div id="stat-total" class="text-3xl font-extrabold text-indigo-900 mt-1">0</div>
-      </div>
-      <div class="bg-white rounded-xl shadow p-4">
-        <div class="text-xs text-gray-500 font-bold">현재 접속 중</div>
-        <div id="stat-online" class="text-3xl font-extrabold text-green-600 mt-1">0</div>
-      </div>
-      <div class="bg-white rounded-xl shadow p-4">
-        <div class="text-xs text-gray-500 font-bold">접속 종료</div>
-        <div id="stat-offline" class="text-3xl font-extrabold text-gray-400 mt-1">0</div>
-      </div>
+    <!-- 현재 수업 카드 -->
+    <div id="current-session-card" class="bg-white rounded-xl shadow p-5 mb-6">
+      <!-- JS로 내용 채움: 시작 전 / 진행 중 -->
     </div>
 
-    <div class="bg-white rounded-xl shadow overflow-hidden">
-      <table class="w-full text-sm">
-        <thead class="bg-indigo-900 text-white">
-          <tr>
-            <th class="text-left px-4 py-3 font-bold">상태</th>
-            <th class="text-left px-4 py-3 font-bold">학번</th>
-            <th class="text-left px-4 py-3 font-bold">이름</th>
-            <th class="text-left px-4 py-3 font-bold">마지막 신호</th>
-          </tr>
-        </thead>
-        <tbody id="student-rows">
-          <tr><td colspan="4" class="text-center text-gray-400 py-10">학생이 아직 접속하지 않았습니다.</td></tr>
-        </tbody>
-      </table>
+    <!-- 지난 수업 기록 -->
+    <div class="bg-white rounded-xl shadow p-5">
+      <h2 class="text-lg font-extrabold text-indigo-900 mb-3">📋 지난 수업 기록</h2>
+      <div id="history-list" class="divide-y divide-gray-100 max-h-[420px] overflow-y-auto">
+        <p class="text-gray-400 text-sm py-6 text-center">아직 종료된 수업이 없습니다.</p>
+      </div>
     </div>
 
     <p class="text-xs text-gray-400 mt-4">
-      학생 화면은 20초마다 짧은 신호를 보냅니다. 40초 이상 신호가 없으면 자동으로 "접속 종료"로 표시됩니다.
-      (수업 중 이 창을 계속 열어두시면 실시간으로 갱신됩니다.)
+      학생 화면은 "수업 시작"이 눌려있는 동안에만 20초마다 짧은 신호를 보냅니다. 40초 이상 신호가 없으면 자동으로 "접속 종료"로 표시됩니다.
     </p>
   </div>
 
@@ -75,7 +56,22 @@
     // =======================================================================
 
     const OFFLINE_THRESHOLD_MS = 40000; // 40초 이상 신호 없으면 오프라인 처리
-    let studentsData = {};
+    const DOW = ['일', '월', '화', '수', '목', '금', '토'];
+
+    let db = null;
+    let activeSessionId = null;
+    let activeSessionLabel = '';
+    let liveStudents = {};
+    let allSessions = {};
+
+    function formatDateTime(ts) {
+      if (!ts) return '-';
+      const d = new Date(ts);
+      const ampm = d.getHours() < 12 ? '오전' : '오후';
+      let h = d.getHours() % 12; if (h === 0) h = 12;
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      return `${d.getMonth() + 1}/${d.getDate()}(${DOW[d.getDay()]}) ${ampm} ${h}:${mm}`;
+    }
 
     function timeAgoText(timestamp) {
       if (!timestamp) return '-';
@@ -94,51 +90,191 @@
       return (Date.now() - student.lastActive) < OFFLINE_THRESHOLD_MS;
     }
 
-    function render() {
-      const rows = Object.values(studentsData).sort((a, b) => {
+    // ---------- 현재 수업 카드 ----------
+    function renderCurrentSessionCard() {
+      const card = document.getElementById('current-session-card');
+
+      if (!activeSessionId) {
+        card.innerHTML = `
+          <h2 class="text-lg font-extrabold text-indigo-900 mb-3">현재 진행 중인 수업이 없습니다</h2>
+          <p class="text-sm text-gray-500 mb-4">수업을 시작하면 학생 화면이 접속 신호를 보내기 시작하고, 이 수업이 끝날 때까지의 기록이 하나로 묶입니다.</p>
+          <div class="flex gap-2">
+            <input id="session-label-input" type="text" placeholder="예: 3학년 2반 5교시"
+              class="flex-1 px-3.5 py-2.5 border border-gray-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+            <button id="start-session-btn" class="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-sm rounded-xl transition">
+              ▶ 수업 시작
+            </button>
+          </div>
+        `;
+        document.getElementById('start-session-btn').onclick = startSession;
+        return;
+      }
+
+      const rows = Object.values(liveStudents);
+      const onlineCount = rows.filter(isEffectivelyOnline).length;
+
+      card.innerHTML = `
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <div class="text-xs text-gray-400 font-bold">진행 중인 수업</div>
+            <h2 class="text-lg font-extrabold text-indigo-900">${activeSessionLabel}</h2>
+          </div>
+          <button id="end-session-btn" class="px-4 py-2 bg-red-50 hover:bg-red-100 text-red-600 font-extrabold text-sm rounded-xl border border-red-200 transition">
+            ■ 수업 종료
+          </button>
+        </div>
+        <div class="grid grid-cols-3 gap-3 mb-4">
+          <div class="bg-slate-50 rounded-lg p-3">
+            <div class="text-xs text-gray-500 font-bold">전체 학생 수</div>
+            <div class="text-2xl font-extrabold text-indigo-900">${rows.length}</div>
+          </div>
+          <div class="bg-slate-50 rounded-lg p-3">
+            <div class="text-xs text-gray-500 font-bold">현재 접속 중</div>
+            <div class="text-2xl font-extrabold text-green-600">${onlineCount}</div>
+          </div>
+          <div class="bg-slate-50 rounded-lg p-3">
+            <div class="text-xs text-gray-500 font-bold">접속 종료</div>
+            <div class="text-2xl font-extrabold text-gray-400">${rows.length - onlineCount}</div>
+          </div>
+        </div>
+        <div class="rounded-lg overflow-hidden border border-gray-100">
+          <table class="w-full text-sm">
+            <thead class="bg-indigo-900 text-white">
+              <tr>
+                <th class="text-left px-3 py-2 font-bold">상태</th>
+                <th class="text-left px-3 py-2 font-bold">학번</th>
+                <th class="text-left px-3 py-2 font-bold">이름</th>
+                <th class="text-left px-3 py-2 font-bold">마지막 신호</th>
+              </tr>
+            </thead>
+            <tbody id="live-student-rows"></tbody>
+          </table>
+        </div>
+      `;
+      document.getElementById('end-session-btn').onclick = endSession;
+      renderLiveStudentRows();
+    }
+
+    function renderLiveStudentRows() {
+      const tbody = document.getElementById('live-student-rows');
+      if (!tbody) return;
+
+      const rows = Object.values(liveStudents).sort((a, b) => {
         const aOnline = isEffectivelyOnline(a);
         const bOnline = isEffectivelyOnline(b);
         if (aOnline !== bOnline) return aOnline ? -1 : 1;
         return (a.id || '').localeCompare(b.id || '');
       });
 
-      const tbody = document.getElementById('student-rows');
       if (rows.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="4" class="text-center text-gray-400 py-10">학생이 아직 접속하지 않았습니다.</td></tr>';
-      } else {
-        tbody.innerHTML = rows.map(s => {
-          const online = isEffectivelyOnline(s);
-          const badge = online
-            ? '<span class="inline-flex items-center gap-1.5 text-green-700 font-bold"><span class="w-2 h-2 rounded-full bg-green-500 inline-block"></span>접속 중</span>'
-            : '<span class="inline-flex items-center gap-1.5 text-gray-400 font-bold"><span class="w-2 h-2 rounded-full bg-gray-300 inline-block"></span>접속 종료</span>';
-          return `
-            <tr class="border-t border-gray-100">
-              <td class="px-4 py-3">${badge}</td>
-              <td class="px-4 py-3 font-mono">${s.id || '-'}</td>
-              <td class="px-4 py-3 font-bold">${s.name || '-'}</td>
-              <td class="px-4 py-3 text-gray-500">${timeAgoText(s.lastActive)}</td>
-            </tr>`;
-        }).join('');
+        tbody.innerHTML = '<tr><td colspan="4" class="text-center text-gray-400 py-8">학생이 아직 접속하지 않았습니다.</td></tr>';
+        return;
       }
 
-      const total = rows.length;
-      const onlineCount = rows.filter(isEffectivelyOnline).length;
-      document.getElementById('stat-total').innerText = total;
-      document.getElementById('stat-online').innerText = onlineCount;
-      document.getElementById('stat-offline').innerText = total - onlineCount;
+      tbody.innerHTML = rows.map(s => {
+        const online = isEffectivelyOnline(s);
+        const badge = online
+          ? '<span class="inline-flex items-center gap-1.5 text-green-700 font-bold"><span class="w-2 h-2 rounded-full bg-green-500 inline-block"></span>접속 중</span>'
+          : '<span class="inline-flex items-center gap-1.5 text-gray-400 font-bold"><span class="w-2 h-2 rounded-full bg-gray-300 inline-block"></span>접속 종료</span>';
+        return `
+          <tr class="border-t border-gray-100">
+            <td class="px-3 py-2">${badge}</td>
+            <td class="px-3 py-2 font-mono">${s.id || '-'}</td>
+            <td class="px-3 py-2 font-bold">${s.name || '-'}</td>
+            <td class="px-3 py-2 text-gray-500">${timeAgoText(s.lastActive)}</td>
+          </tr>`;
+      }).join('');
     }
 
+    // ---------- 지난 수업 기록 ----------
+    function renderHistoryList() {
+      const container = document.getElementById('history-list');
+      const finished = Object.entries(allSessions)
+        .filter(([id, s]) => id !== activeSessionId && s.endTime)
+        .sort((a, b) => (b[1].startTime || 0) - (a[1].startTime || 0));
+
+      if (finished.length === 0) {
+        container.innerHTML = '<p class="text-gray-400 text-sm py-6 text-center">아직 종료된 수업이 없습니다.</p>';
+        return;
+      }
+
+      container.innerHTML = finished.map(([id, s]) => {
+        const count = s.students ? Object.keys(s.students).length : 0;
+        return `
+          <div class="py-3 flex items-center justify-between">
+            <div>
+              <div class="font-bold text-gray-800">${s.label || '(이름 없는 수업)'}</div>
+              <div class="text-xs text-gray-400">${formatDateTime(s.startTime)} ~ ${formatDateTime(s.endTime)} · 학생 ${count}명</div>
+            </div>
+            <button data-session-id="${id}" data-session-label="${(s.label || '수업').replace(/"/g, '')}"
+              class="export-btn px-3.5 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold text-xs rounded-lg transition">
+              엑셀로 내보내기
+            </button>
+          </div>`;
+      }).join('');
+
+      container.querySelectorAll('.export-btn').forEach(btn => {
+        btn.onclick = () => exportSessionToCSV(btn.dataset.sessionId, btn.dataset.sessionLabel);
+      });
+    }
+
+    function exportSessionToCSV(sessionId, label) {
+      const session = allSessions[sessionId];
+      const students = (session && session.students) ? Object.values(session.students) : [];
+
+      let csv = '\uFEFF학번,이름,입장시각,마지막신호\n';
+      students.forEach(s => {
+        csv += `${s.id || ''},${s.name || ''},${formatDateTime(s.firstSeen)},${formatDateTime(s.lastActive)}\n`;
+      });
+
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${label}_출석기록.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    // ---------- 수업 시작/종료 ----------
+    function startSession() {
+      const input = document.getElementById('session-label-input');
+      const label = (input && input.value.trim())
+        ? input.value.trim()
+        : ('수업 ' + formatDateTime(Date.now()));
+
+      const sessionId = db.ref('sessions').push().key;
+      db.ref('sessions/' + sessionId).set({
+        label: label,
+        startTime: firebase.database.ServerValue.TIMESTAMP,
+        endTime: null
+      });
+      db.ref('meta/currentSessionId').set(sessionId);
+    }
+
+    function endSession() {
+      if (!activeSessionId) return;
+      if (!confirm(`"${activeSessionLabel}" 수업을 종료할까요? 종료하면 학생들의 접속 신호가 더 이상 기록되지 않습니다.`)) return;
+
+      db.ref('sessions/' + activeSessionId + '/endTime').set(firebase.database.ServerValue.TIMESTAMP);
+      db.ref('meta/currentSessionId').set(null);
+    }
+
+    // ---------- 초기화 ----------
     function initDashboard() {
       if (!firebaseConfig.databaseURL) {
         document.getElementById('setup-warning').classList.remove('hidden');
         document.getElementById('conn-status').innerText = '설정 필요';
         document.getElementById('conn-status').className = 'text-xs font-bold px-3 py-1.5 rounded-full bg-amber-100 text-amber-700';
+        renderCurrentSessionCard();
         return;
       }
 
       try {
         firebase.initializeApp(firebaseConfig);
-        const db = firebase.database();
+        db = firebase.database();
 
         db.ref('.info/connected').on('value', (snap) => {
           const el = document.getElementById('conn-status');
@@ -151,17 +287,39 @@
           }
         });
 
-        db.ref('students').on('value', (snapshot) => {
-          studentsData = snapshot.val() || {};
-          render();
+        // 모든 수업(세션) 통째로 구독 -> 현재 수업 + 지난 기록 둘 다 여기서 반영
+        db.ref('sessions').on('value', (snapshot) => {
+          allSessions = snapshot.val() || {};
+          if (activeSessionId) {
+            const cur = allSessions[activeSessionId];
+            liveStudents = (cur && cur.students) ? cur.students : {};
+            activeSessionLabel = cur ? cur.label : activeSessionLabel;
+            renderCurrentSessionCard();
+          }
+          renderHistoryList();
         });
 
-        // 신호 타임아웃(40초) 판정은 시간 흐름에 따라 바뀌므로 주기적으로 다시 그려줌
-        setInterval(render, 5000);
+        db.ref('meta/currentSessionId').on('value', (snap) => {
+          activeSessionId = snap.val() || null;
+          if (activeSessionId && allSessions[activeSessionId]) {
+            activeSessionLabel = allSessions[activeSessionId].label || '';
+            liveStudents = allSessions[activeSessionId].students || {};
+          } else {
+            liveStudents = {};
+          }
+          renderCurrentSessionCard();
+          renderHistoryList();
+        });
+
+        // 40초 오프라인 판정은 시간이 흐르며 바뀌므로 주기적으로 다시 그려줌
+        setInterval(() => {
+          if (activeSessionId) renderLiveStudentRows();
+        }, 5000);
       } catch (err) {
         document.getElementById('conn-status').innerText = '연결 오류';
         document.getElementById('conn-status').className = 'text-xs font-bold px-3 py-1.5 rounded-full bg-red-100 text-red-700';
         console.error('Firebase 초기화 오류:', err);
+        renderCurrentSessionCard();
       }
     }
 
